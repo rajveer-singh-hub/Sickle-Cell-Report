@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🧬 CBC Lab Pro Dashboard</title>
+
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#060d1f">
+
+  <!-- React + Babel (no build needed) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <!-- SheetJS for Excel read/write -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: #060d1f;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      color: #e0e8ff;
+    }
+
+    input:focus {
+      border-color: #00d4aa !important;
+      box-shadow: 0 0 0 3px rgba(0, 212, 170, 0.15);
+      outline: none;
+    }
+
+    button {
+      transition: opacity 0.15s, transform 0.15s;
+    }
+
+    button:hover {
+      opacity: 0.88;
+      transform: translateY(-1px);
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #949eb1;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #1a2a4a;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #2a3a5c;
+    }
+
+    table tbody tr {
+      transition: background 0.1s;
+    }
+
+    table tbody tr:hover {
+      background: rgba(0, 212, 170, 0.1) !important;
+      cursor: pointer;
+    }
+
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+
+      #print-area,
+      #print-area * {
+        visibility: visible;
+      }
+
+      #print-area {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        color: black !important;
+        background: white !important;
+      }
+
+      .no-print {
+        display: none !important;
+      }
+
+      /* Reset dark mode borders for print */
+      #print-card {
+        border: 1px solid #ddd !important;
+        box-shadow: none !important;
+      }
+    }
+
+    .glass-login {
+      background: rgba(10, 20, 40, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Switch CSS */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #1a2a4a;
+      transition: .3s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #e0e8ff;
+      transition: .3s;
+      border-radius: 50%;
+    }
+
+    input:checked+.slider {
+      background-color: #00d4aa;
+    }
+
+    input:checked+.slider:before {
+      transform: translateX(20px);
+      background-color: #060d1f;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useCallback, useEffect } = React;
+
+    // ── Logic ──────────────────────────────────────────────────────────────────
+
+    const PARAM_MAP = {
+      "haemoglobin": "HB", "hb": "HB", "hb%": "HB",
+      "r.d.w.*": "RDW", "rdw": "RDW", "r.d.w": "RDW",
+      "m.c.v.": "MCV", "mcv": "MCV",
+      "r.b.c.count": "RBC", "rbc": "RBC", "r.b.c. count": "RBC",
+    };
+
+    function normalizeParam(name) {
+      if (!name) return null;
+      return PARAM_MAP[name.toString().trim().toLowerCase()] || null;
+    }
+
+    function processFile(arrayBuffer) {
+      const wb = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+      const patients = {};
+      for (const row of rawRows) {
+        const col0 = row[0];
+        if (!col0) continue;
+        if (!col0.toString().match(/2024|2025|2026|2027|2028/) && !(col0 instanceof Date)) continue;
+
+        const labCode = row[2]?.toString().trim();
+        const patientName = row[8]?.toString().trim();
+        const paramName = row[11]?.toString().trim();
+        const result = row[14] != null ? row[14].toString().trim() : null;
+
+        // Auto-detect camp name: scan columns 15-20 for long text that is NOT age/gender/mobile/doctor
+        let campName = "";
+        for (let ci = 15; ci <= 20; ci++) {
+          const val = row[ci];
+          if (!val) continue;
+          const s = val.toString().trim();
+          if (!s || s.length < 5) continue;
+          // Skip if it looks like age (e.g. "23 Years", "76 Years", just digits)
+          if (/^\d+\s*(years?|yrs?)?$/i.test(s)) continue;
+          // Skip if it contains "years" anywhere (like "23 Years")
+          if (/years?/i.test(s) && /\d/.test(s)) continue;
+          // Skip if it's just "Years" by itself
+          if (/^years?$/i.test(s)) continue;
+          // Skip if it looks like gender
+          if (/^(male|female|m|f|other)$/i.test(s)) continue;
+          // Skip if it looks like mobile number (all digits, 10+ chars)
+          if (/^\d{10,}$/.test(s)) continue;
+          // Skip if it's just a number
+          if (!isNaN(s)) continue;
+          // Skip if it looks like a doctor name (starts with DR/DR.)
+          if (/^dr[\s.]/i.test(s)) continue;
+          // This looks like a camp name — strip trailing date like (4.05.26) or (07.03.26)
+          campName = s.replace(/\s*\(\d{1,2}\.\d{2}\.\d{2,4}\)\s*$/, "").trim();
+          break;
+        }
+
+        const age = row[19] != null ? row[19] : "";
+        const gender = row[22]?.toString().trim() || row[21]?.toString().trim() || "";
+        const mobile = row[23]?.toString().trim() || row[24]?.toString().trim() || "";
+
+        if (!labCode || !paramName) continue;
+        const mapped = normalizeParam(paramName);
+        if (!mapped) continue;
+
+        if (!patients[labCode]) {
+          patients[labCode] = {
+            PatientID: labCode,
+            CampName: campName || "",
+            Name: patientName || "", Mob: mobile, Age: age, Sex: gender,
+            HB: null, RDW: null, MCV: null, RBC: null,
+          };
+        }
+        const val = parseFloat(result);
+        if (!isNaN(val)) patients[labCode][mapped] = val;
+
+        if (patientName && !patients[labCode].Name) patients[labCode].Name = patientName;
+        if (mobile && !patients[labCode].Mob) patients[labCode].Mob = mobile;
+        if (age !== "" && patients[labCode].Age === "") patients[labCode].Age = age;
+        if (gender && !patients[labCode].Sex) patients[labCode].Sex = gender;
+        if (campName && !patients[labCode].CampName) patients[labCode].CampName = campName;
+      }
+
+      const rows = Object.values(patients).sort((a, b) => a.PatientID.localeCompare(b.PatientID)).map((p, idx) => {
+        const mi = (p.MCV !== null && p.RBC !== null && p.RBC !== 0) ? parseFloat((p.MCV / p.RBC).toFixed(2)) : "";
+        const hplcHB = (p.HB !== null && p.HB < 11) ? "Yes" : "NO";
+        const hplcMI = (mi !== "" && mi < 13) ? "Yes" : "NO";
+        return { Sr: idx + 1, ...p, "M.I": mi, "HPLC-MI": hplcMI, "HPLC-HB": hplcHB, "SOLU ": "", "RESULT ": "" };
+      });
+
+      if (!rows.length) throw new Error("No patient CBC data found. Please check file format.");
+      return rows;
+    }
+
+    // ── Camp Helpers ──────────────────────────────────────────────────────────
+
+    // Group patients by their CampName (extracted from Excel column S)
+    function getCamps(rows) {
+      const camps = {};
+      rows.forEach(r => {
+        const key = (r.CampName || "").trim() || "UNKNOWN";
+        if (!camps[key]) camps[key] = [];
+        camps[key].push(r);
+      });
+      return camps;
+    }
+
+    // Filter rows by search query — searches CampName and PatientID
+    function filterByCampQuery(rows, query) {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      return rows.filter(r => {
+        const camp = (r.CampName || "").toLowerCase();
+        const id = r.PatientID.toString().toLowerCase();
+        return camp.includes(q) || id.includes(q);
+      });
+    }
+
+    // ── Sheet Builders ──────────────────────────────────────────────────────────
+
+    function makeSheet(sheetRows, total, label, dateStr) {
+      const data = [
+        [`${label} ${dateStr || ""}`, "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ["", "", `TOTAL SAMPLE-${total}`, "", "", "", "", "", "", "", "", "DO NOT EDIT", "", "", ""],
+        ["Sr.", "Patient ID", "Name", "Mob. ", "Age", "Sex", "HB", "RDW", "MCV", "RBC", "M.I", "HPLC (MI<13)", "HPLC (HB<11)", "SOLU ", "RESULT "],
+        ...sheetRows.map((r, i) => [
+          i + 1, r.PatientID, r.Name, r.Mob, r.Age, r.Sex, r.HB, r.RDW, r.MCV, r.RBC, r["M.I"], r["HPLC-MI"], r["HPLC-HB"], "", ""
+        ])
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws["!cols"] = [5, 14, 22, 13, 5, 8, 6, 7, 7, 6, 13, 12, 12, 7, 9].map(w => ({ wch: w }));
+      return ws;
+    }
+
+    function generateAndDownload(rows, college, dateStr) {
+      const wb = XLSX.utils.book_new();
+      const tabName = (dateStr || "Sheet").replace(/[\/\\*?:[\]]/g, "-").substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, makeSheet(rows, rows.length, college, dateStr), tabName);
+      const hplcRows = rows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes");
+      XLSX.utils.book_append_sheet(wb, makeSheet(hplcRows, rows.length, college, dateStr), "HPLC");
+      XLSX.writeFile(wb, `${dateStr || "output"}_MASTER.xlsx`);
+    }
+
+    function downloadCamp(campRows, campName, college, dateStr) {
+      const wb = XLSX.utils.book_new();
+      const label = college ? `${college} - ${campName}` : campName;
+      const safeName = campName.replace(/[\/\\*?:[\],]/g, "-").substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, makeSheet(campRows, campRows.length, label, dateStr), safeName || "Sheet1");
+      const hplcRows = campRows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes");
+      if (hplcRows.length > 0) {
+        XLSX.utils.book_append_sheet(wb, makeSheet(hplcRows, campRows.length, label, dateStr), "HPLC");
+      }
+      const fileName = safeName.replace(/\s+/g, "_");
+      XLSX.writeFile(wb, `${fileName}_${dateStr || "output"}.xlsx`);
+    }
+
+    // Download HPLC-only report, camp-wise (one sheet per camp)
+    function downloadHPLCCampReport(rows, college, dateStr) {
+      const hplcAll = rows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes");
+      if (hplcAll.length === 0) { alert("No HPLC flagged patients found!"); return; }
+
+      const camps = {};
+      hplcAll.forEach(r => {
+        const key = (r.CampName || "").trim() || "UNKNOWN";
+        if (!camps[key]) camps[key] = [];
+        camps[key].push(r);
+      });
+
+      const wb = XLSX.utils.book_new();
+      const campKeys = Object.keys(camps).sort();
+
+      // Summary sheet first
+      const summaryData = [
+        [`HPLC LAB REPORT - ${college || ""} ${dateStr || ""}`, "", "", ""],
+        [""],
+        ["Camp Name", "Total HPLC", "HB<11", "MI<13"],
+        ...campKeys.map(c => [
+          c,
+          camps[c].length,
+          camps[c].filter(r => r["HPLC-HB"] === "Yes").length,
+          camps[c].filter(r => r["HPLC-MI"] === "Yes").length
+        ]),
+        [""],
+        ["TOTAL", hplcAll.length, hplcAll.filter(r => r["HPLC-HB"] === "Yes").length, hplcAll.filter(r => r["HPLC-MI"] === "Yes").length]
+      ];
+      const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
+      summaryWs["!cols"] = [{ wch: 40 }, { wch: 12 }, { wch: 10 }, { wch: 10 }];
+      XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
+
+      // One sheet per camp
+      campKeys.forEach(camp => {
+        const cRows = camps[camp];
+        const safeName = camp.replace(/[\/\\*?:[\],]/g, "-").substring(0, 31);
+        const label = college ? `${college} - ${camp}` : camp;
+        XLSX.utils.book_append_sheet(wb, makeSheet(cRows, cRows.length, label, dateStr), safeName || "Sheet");
+      });
+
+      XLSX.writeFile(wb, `HPLC_REPORT_${dateStr || "output"}.xlsx`);
+    }
+
+    // ── Components & Styles ───────────────────────────────────────────────────
+
+    const S = {
+      card: { background: "#0a1428", border: "1px solid #1a2a4a", borderRadius: 20, padding: 28 },
+      title: { color: "#e0e8ff", fontSize: 26, fontWeight: 800, textAlign: "center", marginBottom: 4 },
+      btn: (p) => ({ width: "100%", padding: "13px 20px", background: p ? "#00d4aa" : "transparent", border: p ? "none" : "1px solid #2a3a5c", borderRadius: 11, color: p ? "#060d1f" : "#7a9acd", fontSize: 14, fontWeight: 700, cursor: "pointer" }),
+      input: { width: "100%", padding: "12px 16px", background: "#060d1f", border: "1px solid #2a3a5c", borderRadius: 9, color: "#e0e8ff", fontSize: 14 },
+      tag: (c) => ({ display: "inline-block", padding: "2px 8px", borderRadius: 5, fontSize: 11, fontWeight: 600, background: `${c}28`, color: c }),
+      statCard: { flex: 1, background: "#060d1f", border: "1px solid #1a2a4a", borderRadius: 12, padding: "18px 16px", textAlign: "center" }
+    };
+
+    function Alert({ msg, type = "error" }) {
+      if (!msg) return null;
+      const c = type === "error" ? "#ff8080" : "#00d4aa";
+      return <div style={{ marginBottom: 16, padding: "12px 16px", background: `${c}15`, border: `1px solid ${c}40`, borderRadius: 10, color: c, fontSize: 13, fontWeight: 500 }}>{msg}</div>;
+    }
+
+    // ── Main App ──────────────────────────────────────────────────────────────
+
+    function App() {
+      // States
+      const [auth, setAuth] = useState(() => localStorage.getItem("labAuth") === "true");
+      const [loginID, setLoginID] = useState("");
+      const [loginPIN, setLoginPIN] = useState("");
+      const [loginErr, setLoginErr] = useState("");
+
+      const [stage, setStage] = useState("upload"); // upload, config, done
+      const [campSearch, setCampSearch] = useState("");
+      const [isDragging, setDrag] = useState(false);
+      const [fileName, setFileName] = useState("");
+      const [rows, setRows] = useState([]);
+      const [college, setCollege] = useState("");
+      const [dateStr, setDateStr] = useState("");
+      const [error, setError] = useState("");
+      const [proc, setProc] = useState(false);
+
+      const [privacyMode, setPrivacyMode] = useState(false);
+      const [selectedPatient, setSelectedPatient] = useState(null);
+
+      const [history, setHistory] = useState(() => JSON.parse(localStorage.getItem("labHistory") || "[]"));
+
+      const inputRef = useRef();
+
+      useEffect(() => { localStorage.setItem("labHistory", JSON.stringify(history)); }, [history]);
+      useEffect(() => { if (auth) localStorage.setItem("labAuth", "true"); }, [auth]);
+
+      // Handlers
+      const doLogin = (e) => {
+        e.preventDefault();
+        if (loginID === "admin" && loginPIN === "1234") { setAuth(true); setLoginErr(""); }
+        else setLoginErr("Invalid Lab ID or PIN.");
+      };
+
+      const handleFile = useCallback(async (file) => {
+        setError(""); setProc(true); setFileName(file.name);
+        const m = file.name.match(/(\d{2}-\d{2}-\d{4})/);
+        if (m) setDateStr(m[1]);
+        try {
+          const buf = await file.arrayBuffer();
+          const parsed = processFile(buf);
+          setRows(parsed);
+          setStage("config");
+        } catch (e) { setError(e.message); }
+        finally { setProc(false); }
+      }, []);
+
+      const doDownload = () => {
+        generateAndDownload(rows, college, dateStr);
+        setHistory(prev => [{ id: Date.now(), date: dateStr || new Date().toLocaleDateString(), col: college, patients: rows.length, hplc: rows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes").length }, ...prev]);
+        setStage("done");
+      };
+
+      const hplcCount = rows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes").length;
+      const mCount = rows.filter(r => /^m/i.test(r.Sex)).length;
+      const fCount = rows.filter(r => /^f/i.test(r.Sex)).length;
+
+      // ── RENDER ──
+
+      // LOGIN SCREEN
+      if (!auth) return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "url('https://images.unsplash.com/photo-1579684385127-1ef15d508118?q=80&w=1600&auto=format&fit=crop') center/cover" }}>
+          <div style={{ position: "absolute", inset: 0, background: "linear-gradient(135deg, rgba(6,13,31,0.9), rgba(10,20,40,0.8))" }} />
+          <form onSubmit={doLogin} className="glass-login" style={{ position: "relative", width: 400, padding: 40, borderRadius: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 48, marginBottom: 10 }}>🧬</div>
+            <h1 style={{ color: "white", fontSize: 24, marginBottom: 8 }}>CBC Lab Pro</h1>
+            <p style={{ color: "#7a9acd", fontSize: 14, marginBottom: 32 }}>Secure Staff Login Portal</p>
+
+            <Alert msg={loginErr} />
+
+            <div style={{ textAlign: "left", marginBottom: 16 }}>
+              <label style={{ display: "block", color: "#5a7aaa", fontSize: 12, marginBottom: 6, fontWeight: 600 }}>LAB TECH ID</label>
+              <input style={S.input} value={loginID} onChange={e => setLoginID(e.target.value)} placeholder="Enter ID (admin)" autoFocus />
+            </div>
+            <div style={{ textAlign: "left", marginBottom: 32 }}>
+              <label style={{ display: "block", color: "#5a7aaa", fontSize: 12, marginBottom: 6, fontWeight: 600 }}>SECURE PIN</label>
+              <input type="password" style={S.input} value={loginPIN} onChange={e => setLoginPIN(e.target.value)} placeholder="●●●●" />
+            </div>
+            <button style={S.btn(true)} type="submit">Unlock Dashboard →</button>
+          </form>
+        </div>
+      );
+
+      // MAIN APP
+      return (
+        <div style={{ display: "flex", minHeight: "100vh", background: "#060d1f" }}>
+
+          {/* Main Content Area */}
+          <div style={{ flex: 1, padding: "30px 40px", overflowY: "auto" }}>
+
+            {/* Header Area */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 30 }}>
+              <div>
+                <h1 style={{ color: "white", fontSize: 24 }}>🧬 CBC Analytics Dashboard</h1>
+                <p style={{ color: "#7a9acd", fontSize: 13, marginTop: 4 }}>Connected as <strong style={{ color: "#00d4aa" }}>Admin</strong></p>
+              </div>
+
+              {/* Privacy Toggle */}
+              {stage === "config" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, background: privacyMode ? "rgba(255,170,68,0.1)" : "#0a1428", padding: "8px 16px", borderRadius: 30, border: `1px solid ${privacyMode ? "#ffaa44" : "#1a2a4a"}`, transition: "all 0.3s" }}>
+                  <span style={{ fontSize: 13, color: privacyMode ? "#ffaa44" : "#5a7aaa", fontWeight: 600 }}>Privacy Mode</span>
+                  <label className="switch">
+                    <input type="checkbox" checked={privacyMode} onChange={e => setPrivacyMode(e.target.checked)} />
+                    <span className="slider"></span>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div style={{ maxWidth: 900, margin: "0 auto" }}>
+
+              {/* STAGE: UPLOAD */}
+              {stage === "upload" && (
+                <div style={S.card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
+                    <h2 style={{ fontSize: 18, color: "white" }}>Import Lab Data</h2>
+                  </div>
+
+                  <div style={{ border: `2px dashed ${isDragging ? "#00d4aa" : "#2a3a5c"}`, borderRadius: 16, padding: "60px 24px", textAlign: "center", cursor: "pointer", background: isDragging ? "rgba(0,212,170,0.04)" : "rgba(5,12,25,0.6)", transition: "all 0.2s" }}
+                    onClick={() => inputRef.current.click()}
+                    onDragOver={e => { e.preventDefault(); setDrag(true); }}
+                    onDragLeave={() => setDrag(false)}
+                    onDrop={e => { e.preventDefault(); setDrag(false); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); }}
+                  >
+                    <input ref={inputRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }} onChange={e => { if (e.target.files[0]) handleFile(e.target.files[0]); }} />
+                    <div style={{ fontSize: 44, marginBottom: 14 }}>📂</div>
+                    <div style={{ color: "#e0e8ff", fontSize: 16, fontWeight: 600 }}>Drop raw CBC Excel here</div>
+                    <div style={{ color: "#5a7aaa", fontSize: 13, marginTop: 8 }}>Auto-cleans and applies HPLC flagging algorithm</div>
+                  </div>
+
+                  {proc && <div style={{ textAlign: "center", color: "#00d4aa", mt: 16 }}>⏳ Analyzing data...</div>}
+                  <div style={{ marginTop: 14 }}><Alert msg={error} /></div>
+                </div>
+              )}
+
+              {/* STAGE: CONFIG/DASHBOARD */}
+              {stage === "config" && (
+                <div>
+
+                  {/* Dashboard Charts Row */}
+                  <div style={{ display: "flex", gap: 20, marginBottom: 24 }}>
+
+                    {/* Stats Box */}
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                      <div style={{ ...S.card, flex: 1, display: "flex", alignItems: "center", gap: 20, padding: 20 }}>
+                        <div style={{ width: 60, height: 60, borderRadius: "50%", background: "rgba(0,212,170,0.1)", display: "flex", alignItems: "center", justifyContent: "center", color: "#00d4aa", fontSize: 24 }}>👥</div>
+                        <div><div style={{ fontSize: 28, fontWeight: 800 }}>{rows.length}</div><div style={{ color: "#7a9acd", fontSize: 12 }}>Valid Patients</div></div>
+                      </div>
+                      <div style={{ ...S.card, flex: 1, display: "flex", alignItems: "center", gap: 20, padding: 20 }}>
+                        <div style={{ width: 60, height: 60, borderRadius: "50%", background: "rgba(255,170,68,0.1)", display: "flex", alignItems: "center", justifyContent: "center", color: "#ffaa44", fontSize: 24 }}>⚠️</div>
+                        <div><div style={{ fontSize: 28, fontWeight: 800 }}>{hplcCount}</div><div style={{ color: "#7a9acd", fontSize: 12 }}>HPLC Flagged</div></div>
+                      </div>
+                    </div>
+
+                    {/* HPLC Pie Chart Box */}
+                    <div style={{ ...S.card, flex: 1, padding: 20 }}>
+                      <h3 style={{ color: "#5a7aaa", fontSize: 12, marginBottom: 16 }}>HPLC DISTRIBUTION</h3>
+                      <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+                        <div style={{ width: 100, height: 100, borderRadius: "50%", background: `conic-gradient(#ffaa44 ${Math.round((hplcCount / rows.length) * 100)}%, #00d4aa 0)` }}></div>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><div style={{ width: 10, height: 10, background: "#ffaa44", borderRadius: 2 }}></div><span style={{ fontSize: 13 }}>Flagged ({Math.round(hplcCount / rows.length * 100)}%)</span></div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><div style={{ width: 10, height: 10, background: "#00d4aa", borderRadius: 2 }}></div><span style={{ fontSize: 13 }}>Normal ({Math.round((rows.length - hplcCount) / rows.length * 100)}%)</span></div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Gender Bar Chart Box */}
+                    <div style={{ ...S.card, flex: 1, padding: 20 }}>
+                      <h3 style={{ color: "#5a7aaa", fontSize: 12, marginBottom: 16 }}>MALE VS FEMALE</h3>
+                      <div style={{ display: "flex", height: 80, alignItems: "flex-end", gap: 30, paddingLeft: 10 }}>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                          <div style={{ width: 34, height: `${Math.max(10, (mCount / rows.length) * 80)}px`, background: "#4e8df5", borderRadius: "4px 4px 0 0" }}></div>
+                          <span style={{ fontSize: 11, color: "#7a9acd" }}>M ({mCount})</span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                          <div style={{ width: 34, height: `${Math.max(10, (fCount / rows.length) * 80)}px`, background: "#ff7eb3", borderRadius: "4px 4px 0 0" }}></div>
+                          <span style={{ fontSize: 11, color: "#7a9acd" }}>F ({fCount})</span>
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+
+                  {/* Form & Table */}
+                  <div style={S.card}>
+                    <div style={{ display: "flex", gap: 14, marginBottom: 20 }}>
+                      <div style={{ flex: 2 }}><label style={{ ...S.label, color: "#7a9acd" }}>COLLEGE / CAMP NAME</label><input style={{ ...S.input, background: "#0a1428" }} value={college} onChange={e => setCollege(e.target.value)} /></div>
+                      <div style={{ flex: 1 }}><label style={{ ...S.label, color: "#7a9acd" }}>DATE</label><input style={{ ...S.input, background: "#0a1428" }} value={dateStr} onChange={e => setDateStr(e.target.value)} /></div>
+                    </div>
+
+                    <div style={{ background: "#060d1f", borderRadius: 12, border: "1px solid #1a2a4a", overflow: "hidden", marginBottom: 20 }}>
+                      <div style={{ padding: "12px 16px", borderBottom: "1px solid #1a2a4a", fontSize: 12, color: "#00d4aa", fontWeight: 600 }}>PATIENT PREVIEW (Click row for report)</div>
+                      <div style={{ overflowX: "auto", maxHeight: 300 }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, textAlign: "left" }}>
+                          <thead style={{ position: "sticky", top: 0, background: "#0a1428", zIndex: 10 }}>
+                            <tr>{["Sr", "ID", "Name", "Age", "Sex", "HB", "MCV", "RBC", "M.I", "MI<13", "HB<11"].map(h => <th key={h} style={{ padding: "10px 14px", color: "#5a7aaa", fontWeight: 600, borderBottom: "1px solid #1a2a4a" }}>{h}</th>)}</tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((r, i) => (
+                              <tr key={i} onClick={() => setSelectedPatient(r)} style={{ borderBottom: "1px solid #0f1c35", background: (r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes") ? "rgba(255,170,68,0.03)" : "transparent" }}>
+                                <td style={{ padding: "10px 14px", color: "#5a7aaa" }}>{r.Sr}</td>
+                                <td style={{ padding: "10px 14px", fontWeight: 500, color: "#e0e8ff" }}>{r.PatientID}</td>
+                                <td style={{ padding: "10px 14px", color: privacyMode ? "#5a7aaa" : "#c0d4f0" }}>{privacyMode ? "••••••••••••" : r.Name}</td>
+                                <td style={{ padding: "10px 14px" }}>{r.Age}</td>
+                                <td style={{ padding: "10px 14px", color: r.Sex === "Female" ? "#ff7eb3" : "#4e8df5" }}>{r.Sex}</td>
+                                <td style={{ padding: "10px 14px", color: "#c0d4f0" }}>{r.HB}</td>
+                                <td style={{ padding: "10px 14px", color: "#c0d4f0" }}>{r.MCV}</td>
+                                <td style={{ padding: "10px 14px", color: "#c0d4f0" }}>{r.RBC}</td>
+                                <td style={{ padding: "10px 14px", color: "#00d4aa", fontWeight: 600 }}>{r["M.I"]}</td>
+                                <td style={{ padding: "10px 14px" }}><span style={S.tag(r["HPLC-MI"] === "Yes" ? "#ffaa44" : "#1a2a4a")}>{r["HPLC-MI"]}</span></td>
+                                <td style={{ padding: "10px 14px" }}><span style={S.tag(r["HPLC-HB"] === "Yes" ? "#ffaa44" : "#1a2a4a")}>{r["HPLC-HB"]}</span></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <button style={{ ...S.btn(false), flex: 0.3 }} onClick={() => { setStage("upload"); setRows([]); }}>Cancel</button>
+                      <button style={{ ...S.btn(true), flex: 1 }} onClick={doDownload}>⬇️ Download Master Excel (All)</button>
+                    </div>
+                  </div>
+
+                  {/* ── Camp-wise Download Section ── */}
+                  <div style={{ ...S.card, marginTop: 20 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+                      <div style={{ fontSize: 22 }}>🏕️</div>
+                      <div>
+                        <h3 style={{ color: "#e0e8ff", fontSize: 15, fontWeight: 700 }}>Download by Camp</h3>
+                        <p style={{ color: "#5a7aaa", fontSize: 12, marginTop: 2 }}>Auto-detected from Excel data — or search by name</p>
+                      </div>
+                    </div>
+
+                    {/* Auto-detected camp cards */}
+                    {(() => {
+                      const camps = getCamps(rows);
+                      const campKeys = Object.keys(camps).sort();
+                      return (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+                          {campKeys.map(camp => {
+                            const cRows = camps[camp];
+                            const hC = cRows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes").length;
+                            return (
+                              <div key={camp} style={{ background: "#060d1f", border: "1px solid #1a2a4a", borderRadius: 12, padding: "14px 16px", minWidth: 200, flex: "1 1 200px" }}>
+                                <div style={{ color: "#00d4aa", fontWeight: 700, fontSize: 13, marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{camp}</div>
+                                <div style={{ display: "flex", gap: 12, marginBottom: 10 }}>
+                                  <span style={{ fontSize: 11, color: "#e0e8ff" }}>👥 {cRows.length}</span>
+                                  <span style={{ fontSize: 11, color: "#ffaa44" }}>⚠️ {hC} HPLC</span>
+                                </div>
+                                <div style={{ display: "flex", gap: 6 }}>
+                                  <button
+                                    style={{ flex: 1, padding: "8px 0", background: "#00d4aa", border: "none", borderRadius: 8, color: "#060d1f", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                                    onClick={() => downloadCamp(cRows, camp, college, dateStr)}
+                                  >⬇️ All</button>
+                                  <button
+                                    style={{ flex: 1, padding: "8px 0", background: hC > 0 ? "#ffaa44" : "#1a2a4a", border: "none", borderRadius: 8, color: hC > 0 ? "#060d1f" : "#5a7aaa", fontSize: 11, fontWeight: 700, cursor: hC > 0 ? "pointer" : "not-allowed" }}
+                                    onClick={() => { if (hC > 0) downloadCamp(cRows.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes"), camp + "_HPLC", college, dateStr); }}
+                                    disabled={hC === 0}
+                                  >🧪 HPLC</button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Manual Camp Search */}
+                    <div style={{ borderTop: "1px solid #1a2a4a", paddingTop: 18 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                        <span style={{ fontSize: 16 }}>🔍</span>
+                        <div>
+                          <div style={{ color: "#e0e8ff", fontSize: 13, fontWeight: 700 }}>Search Camp by Name</div>
+                          <div style={{ color: "#5a7aaa", fontSize: 11 }}>Type camp name like "rajat mahotsav" or "chandrapur" to filter & download</div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <div style={{ flex: 1 }}>
+                          <input
+                            style={{ ...S.input, background: "#060d1f", fontSize: 15 }}
+                            placeholder='e.g. "rajat mahotsav", "chandrapur"...'
+                            value={campSearch}
+                            onChange={e => setCampSearch(e.target.value)}
+                          />
+                          {campSearch.trim() && (() => {
+                            const matched = filterByCampQuery(rows, campSearch);
+                            const hC = matched.filter(r => r["HPLC-HB"] === "Yes" || r["HPLC-MI"] === "Yes").length;
+                            const campNames = [...new Set(matched.map(r => r.CampName || "UNKNOWN"))];
+                            return (
+                              <div style={{ marginTop: 8 }}>
+                                {matched.length > 0 ? (
+                                  <div>
+                                    <span style={{ color: "#00d4aa", fontSize: 12, fontWeight: 600 }}>✅ {matched.length} patients found</span>
+                                    <span style={{ color: "#ffaa44", fontSize: 12, marginLeft: 12 }}>⚠️ {hC} HPLC</span>
+                                    {campNames.length > 0 && <div style={{ color: "#5a7aaa", fontSize: 11, marginTop: 4 }}>Camps: {campNames.join(", ")}</div>}
+                                  </div>
+                                ) : (
+                                  <span style={{ color: "#ff8080", fontSize: 12 }}>❌ No patients found matching "{campSearch.trim()}"</span>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        <button
+                          style={{ padding: "12px 20px", background: campSearch.trim() && filterByCampQuery(rows, campSearch).length > 0 ? "#00d4aa" : "#1a2a4a", border: "none", borderRadius: 9, color: campSearch.trim() && filterByCampQuery(rows, campSearch).length > 0 ? "#060d1f" : "#5a7aaa", fontWeight: 700, fontSize: 13, cursor: campSearch.trim() ? "pointer" : "not-allowed", whiteSpace: "nowrap", alignSelf: "flex-start" }}
+                          onClick={() => {
+                            const matched = filterByCampQuery(rows, campSearch);
+                            if (matched.length > 0) {
+                              downloadCamp(matched, campSearch.trim(), college, dateStr);
+                            }
+                          }}
+                          disabled={!campSearch.trim() || filterByCampQuery(rows, campSearch).length === 0}
+                        >⬇️ Download</button>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+              {/* STAGE: DONE */}
+              {stage === "done" && (
+                <div style={{ ...S.card, textAlign: "center", padding: "60px 20px" }}>
+                  <div style={{ fontSize: 60, marginBottom: 20 }}>🎉</div>
+                  <h2 style={{ color: "white", fontSize: 28, marginBottom: 8 }}>Export Complete</h2>
+                  <p style={{ color: "#7a9acd", fontSize: 15, marginBottom: 30 }}>Master list saved with {rows.length} total entries and {hplcCount} test flags.</p>
+                  <button style={{ ...S.btn(true), maxWidth: 300, margin: "0 auto", display: "block" }} onClick={() => { setStage("upload"); setRows([]); }}>Process New File</button>
+                </div>
+              )}
+
+            </div>
+          </div>
+
+          {/* Sidebar Area (History) */}
+          <div className="no-print" style={{ width: 320, background: "#0a1428", borderLeft: "1px solid #1a2a4a", padding: 24, display: "flex", flexDirection: "column" }}>
+            <h3 style={{ color: "white", fontSize: 16, marginBottom: 24, display: "flex", alignItems: "center", gap: 8 }}><span>🕒</span> History Logs</h3>
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
+              {history.length === 0 ? (
+                <div style={{ color: "#5a7aaa", fontSize: 13, textAlign: "center", marginTop: 40 }}>No previous imports</div>
+              ) : (
+                history.map(h => (
+                  <div key={h.id} style={{ background: "#060d1f", border: "1px solid #1a2a4a", padding: 14, borderRadius: 10 }}>
+                    <div style={{ color: "#00d4aa", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>{h.date}</div>
+                    <div style={{ color: "white", fontSize: 13, marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.col}</div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <span style={{ fontSize: 11, color: "#7a9acd" }}>👥 {h.patients}</span>
+                      <span style={{ fontSize: 11, color: "#ffaa44" }}>⚠️ {h.hplc}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <button style={{ ...S.btn(false), marginTop: 20 }} onClick={() => { localStorage.setItem("labAuth", "false"); setAuth(false); }}>Log Out</button>
+          </div>
+
+          {/* REPORT MODAL (Only renders if patient selected) */}
+          {selectedPatient && (
+            <div className="no-print" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 1000, padding: 20 }} onClick={() => setSelectedPatient(null)}>
+
+              <div id="print-area" onClick={e => e.stopPropagation()} style={{ background: "white", color: "#111", width: "100%", maxWidth: 640, borderRadius: 8, overflow: "hidden", boxShadow: "0 25px 50px rgba(0,0,0,0.5)" }}>
+
+                {/* Print Branded Header */}
+                <div style={{ padding: "30px 40px", borderBottom: "2px solid #00d4aa", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <h1 style={{ fontSize: 24, margin: 0, color: "#060d1f" }}>CLINICAL LAB REPORT</h1>
+                    <p style={{ margin: 0, color: "#666", fontSize: 12, marginTop: 4 }}>Ref: {college} | Date: {dateStr || new Date().toLocaleDateString()}</p>
+                  </div>
+                  <div style={{ fontSize: 40 }}>⚕️</div>
+                </div>
+
+                {/* Patient Info */}
+                <div style={{ padding: "30px 40px", background: "#f8f9fa", borderBottom: "1px solid #eee", display: "flex", flexWrap: "wrap", gap: 20 }}>
+                  <div style={{ flex: "1 1 40%" }}><div style={{ fontSize: 10, color: "#888", fontWeight: 700 }}>PATIENT NAME</div><div style={{ fontSize: 16, fontWeight: 600 }}>{privacyMode ? "Masked Data" : selectedPatient.Name}</div></div>
+                  <div style={{ flex: "1 1 20%" }}><div style={{ fontSize: 10, color: "#888", fontWeight: 700 }}>PATIENT ID</div><div style={{ fontSize: 16, fontWeight: 600 }}>{selectedPatient.PatientID}</div></div>
+                  <div style={{ flex: "1 1 20%" }}><div style={{ fontSize: 10, color: "#888", fontWeight: 700 }}>AGE / SEX</div><div style={{ fontSize: 16, fontWeight: 600 }}>{selectedPatient.Age} / {selectedPatient.Sex}</div></div>
+                </div>
+
+                {/* Test Results */}
+                <div style={{ padding: "30px 40px" }}>
+                  <h3 style={{ fontSize: 12, color: "#888", borderBottom: "1px solid #eee", paddingBottom: 8, marginBottom: 16 }}>COMPLETE BLOOD COUNT (CBC) EXTRACT</h3>
+
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "8px 0", color: "#888", fontWeight: 600, borderBottom: "1px solid #ddd" }}>Test Parameter</th>
+                        <th style={{ textAlign: "right", padding: "8px 0", color: "#888", fontWeight: 600, borderBottom: "1px solid #ddd" }}>Observed Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr><td style={{ padding: "12px 0", borderBottom: "1px solid #eee" }}>Haemoglobin (HB)</td><td style={{ textAlign: "right", fontWeight: 600, borderBottom: "1px solid #eee" }}>{selectedPatient.HB}</td></tr>
+                      <tr><td style={{ padding: "12px 0", borderBottom: "1px solid #eee" }}>R.B.C Count</td><td style={{ textAlign: "right", fontWeight: 600, borderBottom: "1px solid #eee" }}>{selectedPatient.RBC}</td></tr>
+                      <tr><td style={{ padding: "12px 0", borderBottom: "1px solid #eee" }}>M.C.V.</td><td style={{ textAlign: "right", fontWeight: 600, borderBottom: "1px solid #eee", color: selectedPatient.MCV < 62 ? "#d93025" : "inherit" }}>{selectedPatient.MCV}</td></tr>
+                      <tr><td style={{ padding: "12px 0", borderBottom: "1px solid #eee" }}>R.D.W</td><td style={{ textAlign: "right", fontWeight: 600, borderBottom: "1px solid #eee" }}>{selectedPatient.RDW || "-"}</td></tr>
+                    </tbody>
+                  </table>
+
+                  {/* Derived Logic */}
+                  <div style={{ marginTop: 24, padding: 16, background: (selectedPatient["HPLC-HB"] === "Yes" || selectedPatient["HPLC-MI"] === "Yes") ? "#fce8e6" : "#e6f4ea", border: `1px solid ${(selectedPatient["HPLC-HB"] === "Yes" || selectedPatient["HPLC-MI"] === "Yes") ? "#fad2cf" : "#ceead6"}`, borderRadius: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#444" }}>M.I. CALCULATED ({selectedPatient.MCV} / {selectedPatient.RBC})</span>
+                      <strong style={{ color: "#000" }}>{selectedPatient["M.I"]}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#444" }}>HPLC (HB &lt; 11)</span>
+                      <strong style={{ color: selectedPatient["HPLC-HB"] === "Yes" ? "#d93025" : "#137333" }}>{selectedPatient["HPLC-HB"] === "Yes" ? "YES" : "NO"}</strong>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#444" }}>HPLC (MI &lt; 13)</span>
+                      <strong style={{ color: selectedPatient["HPLC-MI"] === "Yes" ? "#d93025" : "#137333" }}>{selectedPatient["HPLC-MI"] === "Yes" ? "YES" : "NO"}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions (Hidden on print) */}
+                <div className="no-print" style={{ padding: "20px 40px", background: "#f8f9fa", borderTop: "1px solid #eee", display: "flex", gap: 12, justifyContent: "flex-end" }}>
+                  <button style={{ padding: "10px 20px", background: "transparent", border: "1px solid #ccc", borderRadius: 6, cursor: "pointer", fontWeight: 600, color: "#444" }} onClick={() => setSelectedPatient(null)}>Close</button>
+                  <button style={{ padding: "10px 20px", background: "#060d1f", border: "none", color: "white", borderRadius: 6, cursor: "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}
+                    onClick={() => {
+                      document.title = `Patient_Report_${selectedPatient.PatientID}`;
+                      window.print();
+                      document.title = "🧬 CBC Lab Cleaner Pro";
+                    }}>🖨️ Print Report</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+
+  <script>
+    // Add PWA Support back
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("service-worker.js")
+          .then(() => console.log("✅ Service Worker Registered"))
+          .catch(err => console.log("❌ Error:", err));
+      });
+    }
+  </script>
+</body>
+
+</html>
