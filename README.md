@@ -40,7 +40,7 @@ project/
 ### Option 1: Direct Browser Access
 1. Clone the repository:
    ```bash
-   git clone https://github.com/rajveer-singh-hub/project.git
+   git clone https://github.com/rajveer-singh-hub/Sickle-Cell-Report.git
    cd project
    ```
 2. Open `index.html` in your browser
